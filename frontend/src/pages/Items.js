@@ -1,10 +1,10 @@
-import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useData } from '../state/DataContext';
 import { Link } from 'react-router-dom';
 import './Items.css';
 
 function Items() {
-  const { items, fetchItems, loading, error } = useData();
+  const { items, pagination, fetchItems, loading, error } = useData();
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
@@ -15,19 +15,19 @@ function Items() {
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedQuery(searchQuery);
-      setCurrentPage(1);
+      setCurrentPage(1); // Reset to first page on new search
     }, 300);
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // Fetch items (memory-leak safe)
+  // Fetch items with server-side pagination (memory-leak safe)
   useEffect(() => {
     let mounted = true;
     const abortController = new AbortController();
 
     const loadItems = async () => {
       try {
-        await fetchItems(debouncedQuery, abortController.signal);
+        await fetchItems(debouncedQuery, currentPage, pageSize, abortController.signal);
       } catch (e) {
         if (mounted && e.name !== 'AbortError') {
           console.error('Failed to fetch items:', e);
@@ -41,32 +41,18 @@ function Items() {
       mounted = false;
       abortController.abort();
     };
-  }, [debouncedQuery, fetchItems]);
-
-  // Pagination calculations
-  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
-  const clampedPage = Math.min(currentPage, totalPages);
-
-  useEffect(() => {
-    if (clampedPage !== currentPage) {
-      setCurrentPage(clampedPage);
-    }
-  }, [clampedPage, currentPage]);
-
-  const pageStart = (clampedPage - 1) * pageSize;
-  const pageEnd = pageStart + pageSize;
-  const pageItems = useMemo(() => items.slice(pageStart, pageEnd), [items, pageStart, pageEnd]);
+  }, [debouncedQuery, currentPage, pageSize, fetchItems]);
 
   const handlePageChange = useCallback((delta) => {
     setCurrentPage((prev) => {
-      const next = Math.min(Math.max(1, prev + delta), totalPages);
+      const next = prev + delta;
       // Scroll to top of list
       if (listContainerRef.current) {
         listContainerRef.current.scrollTop = 0;
       }
       return next;
     });
-  }, [totalPages]);
+  }, []);
 
   const handlePageSizeChange = useCallback((e) => {
     setPageSize(parseInt(e.target.value, 10));
@@ -79,20 +65,28 @@ function Items() {
   const clearSearch = useCallback(() => {
     setSearchQuery('');
     setDebouncedQuery('');
+    setCurrentPage(1);
   }, []);
 
   const handleJumpToPage = useCallback((e) => {
     const value = Number(e.target.value);
-    if (!Number.isNaN(value) && value >= 1 && value <= totalPages) {
-      setCurrentPage(value);
+    if (!Number.isNaN(value) && pagination) {
+      const validPage = Math.max(1, Math.min(value, pagination.totalPages));
+      setCurrentPage(validPage);
       if (listContainerRef.current) {
         listContainerRef.current.scrollTop = 0;
       }
     }
-  }, [totalPages]);
+  }, [pagination]);
+
+  // Use server pagination info or fallback
+  const totalPages = pagination?.totalPages || 1;
+  const totalItems = pagination?.totalItems || items.length;
+  const hasNextPage = pagination?.hasNextPage ?? false;
+  const hasPrevPage = pagination?.hasPrevPage ?? false;
 
   // Loading state
-  if (loading) {
+  if (loading && items.length === 0) {
     return (
       <div className="items-container">
         <div className="toolbar">
@@ -120,14 +114,14 @@ function Items() {
   }
 
   // Error state
-  if (error) {
+  if (error && items.length === 0) {
     return (
       <div className="items-container">
         <div className="error-message" role="alert">
           <h3>⚠️ Error Loading Items</h3>
           <p>{error}</p>
           <button
-            onClick={() => fetchItems(debouncedQuery)}
+            onClick={() => fetchItems(debouncedQuery, currentPage, pageSize)}
             className="retry-button"
           >
             Retry
@@ -138,12 +132,13 @@ function Items() {
   }
 
   // Empty state
-  if (!items.length) {
+  if (!items.length && !loading) {
     return (
       <div className="items-container">
         <div className="toolbar">
           <div className="toolbar-left">
             <div className="search-wrapper">
+              <span className="search-icon">🔍</span>
               <input
                 type="search"
                 placeholder="Search items..."
@@ -193,6 +188,7 @@ function Items() {
               onChange={(e) => setSearchQuery(e.target.value)}
               className="search-input"
               aria-label="Search items"
+              disabled={loading}
             />
             {searchQuery && (
               <button
@@ -215,6 +211,7 @@ function Items() {
               onChange={handlePageSizeChange}
               className="page-size-select"
               aria-label="Items per page"
+              disabled={loading}
             >
               {[10, 20, 50, 100].map((n) => (
                 <option key={n} value={n}>{n}</option>
@@ -224,7 +221,8 @@ function Items() {
         </div>
         <div className="toolbar-right">
           <span className="results-count" aria-live="polite">
-            {items.length} {items.length === 1 ? 'item' : 'items'}
+            {totalItems} {totalItems === 1 ? 'item' : 'items'}
+            {pagination && totalPages > 0 && ` • Page ${currentPage} of ${totalPages}`}
           </span>
         </div>
       </div>
@@ -236,7 +234,7 @@ function Items() {
         role="list"
         aria-label="Items list"
       >
-        {pageItems.map((item, index) => (
+        {items.map((item, index) => (
           <div
             key={item.id}
             className="item-row"
@@ -256,12 +254,12 @@ function Items() {
         ))}
       </div>
 
-      {/* Pagination */}
-      {totalPages > 1 && (
+      {/* Pagination - Show only if more than 1 page */}
+      {pagination && totalPages > 1 && (
         <div className="pagination">
           <button
             onClick={() => handlePageChange(-1)}
-            disabled={clampedPage === 1}
+            disabled={!hasPrevPage || loading}
             className="pagination-button"
             aria-label="Previous page"
           >
@@ -270,7 +268,7 @@ function Items() {
 
           <div className="pagination-center">
             <span className="pagination-info">
-              Page <strong>{clampedPage}</strong> of <strong>{totalPages}</strong>
+              Page <strong>{currentPage}</strong> of <strong>{totalPages}</strong>
             </span>
             <div className="jump-to-page">
               <label htmlFor="jumpPage" className="sr-only">Jump to page</label>
@@ -279,17 +277,18 @@ function Items() {
                 type="number"
                 min={1}
                 max={totalPages}
-                value={clampedPage}
+                value={currentPage}
                 onChange={handleJumpToPage}
                 className="jump-input"
                 aria-label="Jump to page"
+                disabled={loading}
               />
             </div>
           </div>
 
           <button
             onClick={() => handlePageChange(1)}
-            disabled={clampedPage === totalPages}
+            disabled={!hasNextPage || loading}
             className="pagination-button"
             aria-label="Next page"
           >

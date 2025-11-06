@@ -24,26 +24,60 @@ async function writeData(data) {
   await fs.writeFile(DATA_PATH, JSON.stringify(data, null, 2), 'utf-8');
 }
 
-// GET /api/items
+// GET /api/items with pagination and search
 router.get('/', async (req, res, next) => {
   try {
     const data = await readData();
-    const { limit, q } = req.query;
+    const { limit, q, page = '1', pageSize = '20' } = req.query;
     let results = data;
 
+    // Apply search filter
     if (q) {
-      // Simple substring search (sub‑optimal but functional)
-      results = results.filter(item => item.name.toLowerCase().includes(q.toLowerCase()));
+      const searchTerm = q.toLowerCase();
+      results = results.filter(item =>
+        item.name.toLowerCase().includes(searchTerm) ||
+        item.category.toLowerCase().includes(searchTerm)
+      );
     }
 
+    // Legacy limit support (backward compatibility - returns array format)
     if (limit) {
       const parsedLimit = parseInt(limit, 10);
       if (!isNaN(parsedLimit) && parsedLimit > 0) {
-        results = results.slice(0, parsedLimit);
+        return res.json(results.slice(0, parsedLimit));
       }
     }
 
-    res.json(results);
+    // Calculate pagination
+    const parsedPage = parseInt(page, 10);
+    const parsedPageSize = parseInt(pageSize, 10);
+    const validPage = !isNaN(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const validPageSize = !isNaN(parsedPageSize) && parsedPageSize > 0 && parsedPageSize <= 100 ? parsedPageSize : 20;
+
+    const totalItems = results.length;
+    const totalPages = Math.max(1, Math.ceil(totalItems / validPageSize));
+
+    // Clamp page to valid range
+    const clampedPage = Math.min(validPage, totalPages);
+
+    const startIndex = (clampedPage - 1) * validPageSize;
+    const endIndex = startIndex + validPageSize;
+
+    // Apply pagination
+    const paginatedResults = results.slice(startIndex, endIndex);
+
+    // Return paginated response with metadata
+    res.json({
+      data: paginatedResults,
+      pagination: {
+        page: clampedPage,
+        pageSize: validPageSize,
+        totalItems,
+        totalPages,
+        hasNextPage: clampedPage < totalPages,
+        hasPrevPage: clampedPage > 1
+      }
+    });
   } catch (err) {
     next(err);
   }
@@ -85,7 +119,6 @@ router.post('/', async (req, res, next) => {
       throw err;
     }
 
-    // Fixed: Added trim() check for category
     if (!category || typeof category !== 'string' || category.trim().length === 0) {
       const err = new Error('Category is required and must be a non-empty string');
       err.status = 400;
